@@ -1,0 +1,131 @@
+version: "3.9"
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: smart-parking-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-parking}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-parking}
+      POSTGRES_DB: ${POSTGRES_DB:-parking}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  central:
+    build:
+      context: ./services/central
+      target: dev
+    env_file:
+      - .env
+    environment:
+      PORT: 4000
+      POSTGRES_HOST: db
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./services/central:/app
+
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      target: dev
+    env_file:
+      - .env
+    environment:
+      PORT: 8080
+      CENTRAL_URL: http://central:4000
+      AI_URL: http://ai-module:8000
+      PAYMENT_URL: http://payment-simulator:5002
+      ASSISTANT_URL: http://assistant-bot:5005
+    depends_on:
+      central:
+        condition: service_started
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./services/api-gateway:/app
+
+  payment-simulator:
+    build:
+      context: ./services/payment-simulator
+    environment:
+      PORT: 5002
+    ports:
+      - "5002:5002"
+    volumes:
+      - ./services/payment-simulator:/app
+
+  ai-module:
+    build:
+      context: ./services/ai-module
+    environment:
+      PORT: 8000
+    ports:
+      - "8000:8000"
+
+  assistant-bot:
+    build:
+      context: ./services/assistant-bot
+    env_file:
+      - .env
+    environment:
+      PORT: 5005
+      CENTRAL_URL: http://central:4000
+    depends_on:
+      central:
+        condition: service_started
+    ports:
+      - "5005:5005"
+    volumes:
+      - ./services/assistant-bot:/app
+
+  iot-simulator:
+    build:
+      context: ./services/iot-simulator
+    environment:
+      CENTRAL_URL: http://central:4000
+    depends_on:
+      central:
+        condition: service_started
+    volumes:
+      - ./services/iot-simulator:/app
+
+  frontend-user:
+    build:
+      context: ./frontends/frontend-user
+    environment:
+      VITE_API_URL: http://localhost:8080
+    depends_on:
+      api-gateway:
+        condition: service_started
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontends/frontend-user:/app
+
+  frontend-admin:
+    build:
+      context: ./frontends/frontend-admin
+    environment:
+      VITE_API_URL: http://localhost:8080
+    depends_on:
+      api-gateway:
+        condition: service_started
+    ports:
+      - "5174:5174"
+    volumes:
+      - ./frontends/frontend-admin:/app
+
+volumes:
+  db-data:
+

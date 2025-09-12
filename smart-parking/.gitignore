@@ -1,29 +1,59 @@
 # OS
-.DS_Store
+**/.DS_Store
+**/Thumbs.db
 
-# Env
-.env
+# Env files (keep examples only)
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env*.example
+**/.envrc
+**/.direnv/
 
 # Node
 **/node_modules/
+node_modules
 **/dist/
-**/.vite/
-**/.next/
 **/build/
+**/.turbo/
+**/.next/
+**/.vite/
 **/coverage/
+**/.eslintcache
+**/.parcel-cache/
+**/.npm/
+**/.pnpm-store/
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
 
 # Python
 **/__pycache__/
 **/*.pyc
+**/.venv/
+**/venv/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
 
 # Logs
 **/*.log
 
-# Docker
-**/.dockerignore
-**/.env.local
-
-# Misc
-.idea/
-.vscode/
+# Editor/IDE
+**/.vscode/
+**/.idea/
 *.swp
+*.code-workspace
+
+# Databases and tooling artifacts
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.sqbpro
+
+# Docker Compose local overrides
+**/docker-compose.override.yml
+
+# Test reports and e2e artifacts
+**/playwright-report/
+**/test-results/
