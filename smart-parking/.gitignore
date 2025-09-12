@@ -1,0 +1,29 @@
+# OS
+.DS_Store
+
+# Env
+.env
+
+# Node
+**/node_modules/
+**/dist/
+**/.vite/
+**/.next/
+**/build/
+**/coverage/
+
+# Python
+**/__pycache__/
+**/*.pyc
+
+# Logs
+**/*.log
+
+# Docker
+**/.dockerignore
+**/.env.local
+
+# Misc
+.idea/
+.vscode/
+*.swp

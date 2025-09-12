@@ -1,0 +1,13 @@
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json tsconfig.json ./
+RUN npm install --include=dev
+COPY src ./src
+ENV CENTRAL_URL=${CENTRAL_URL}
+ENV OPENAI_API_KEY=${OPENAI_API_KEY}
+ENV LLM_MODEL=${LLM_MODEL}
+ENV GEMINI_API_KEY=${GEMINI_API_KEY}
+ENV LLM_PROVIDER=${LLM_PROVIDER}
+ENV OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+ENV OPENROUTER_MODEL=${OPENROUTER_MODEL}
+CMD ["sh", "-lc", "npm install --include=dev && npm run dev"]
