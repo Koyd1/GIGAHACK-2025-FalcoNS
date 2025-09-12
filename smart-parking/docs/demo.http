@@ -1,0 +1,43 @@
+### Zones
+GET http://localhost:8080/api/zones
+
+### Create ticket
+POST http://localhost:8080/api/tickets
+Content-Type: application/json
+
+{
+  "vehicle": "AA123BB",
+  "zoneId": 1
+}
+
+### Close ticket
+POST http://localhost:8080/api/tickets/{{id}}/close
+
+### Pay ticket
+POST http://localhost:8080/api/payments/{{id}}/pay
+
+### Find open ticket by plate
+GET http://localhost:8080/api/tickets/search?vehicle=AA123BB
+
+### Assistant message
+POST http://localhost:8080/api/assistant/message
+Content-Type: application/json
+
+{
+  "text": "Закрыть AA123BB",
+  "lang": "ru-RU"
+}
+
+### Gate state
+GET http://localhost:4000/gate/state
+
+### Gate open/close/passed
+POST http://localhost:4000/gate/open
+Content-Type: application/json
+
+{ "ticketId": 123 }
+
+POST http://localhost:4000/gate/passed
+
+POST http://localhost:4000/gate/close
+
