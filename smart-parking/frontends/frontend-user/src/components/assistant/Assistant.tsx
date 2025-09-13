@@ -42,8 +42,8 @@ export default function Assistant({ zoneId, vehicle, onVehicleChange }: { zoneId
     // naive RU plate extract: like A123BC or A123BC77
     try {
       const raw = text.toUpperCase().replace(/\s|-/g, '')
-      const m = raw.match(/[A-ZА-Я]{1}[0-9]{3}[A-ZА-Я]{2}[0-9]{0,3}/)
-      if (m && m[0].length >= 6) onVehicleChange(m[0])
+      const m = raw.match(/[A-ZА-Я]{2}[0-9]{3}[A-ZА-Я]{2}[0-9]{0,3}/)
+      if (m && m[0].length >= 7) onVehicleChange(m[0])
     } catch {}
     try {
       const r = await api.post('/assistant/message', { text, zoneId, vehicle: vehicle || undefined, lang, sessionId: sessionIdRef.current })
@@ -83,8 +83,8 @@ export default function Assistant({ zoneId, vehicle, onVehicleChange }: { zoneId
       // quick local plate detection
       try {
         const raw = text.toUpperCase().replace(/\s|-/g, '')
-        const m = raw.match(/[A-ZА-Я]{1}[0-9]{3}[A-ZА-Я]{2}[0-9]{0,3}/)
-        if (m && m[0].length >= 6) onVehicleChange(m[0])
+        const m = raw.match(/[A-ZА-Я]{2}[0-9]{3}[A-ZА-Я]{2}[0-9]{0,3}/)
+        if (m && m[0].length >= 7) onVehicleChange(m[0])
       } catch {}
       send(text)
     }

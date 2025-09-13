@@ -162,7 +162,7 @@ router.post('/admin/sessions/:id/close', async (req, res) => {
   const id = Number(req.params.id);
   // Try close public ticket first
   const tr = await query('SELECT t.*, r.price_per_hour FROM tickets t JOIN rates r ON r.zone_id = t.zone_id WHERE t.id=$1', [id]);
-  if (tr.rowCount > 0) {
+  if ((tr.rowCount ?? 0) > 0) {
     const t = tr.rows[0];
     if (t.status !== 'open') return res.status(400).json({ error: 'ticket is not open' });
     const started = new Date(t.started_at).getTime();

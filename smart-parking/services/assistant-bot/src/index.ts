@@ -327,7 +327,7 @@ app.post('/assistant/message', async (req, res) => {
       }
       sessions.delete(sessionId);
       if (d.decision === 'open_gate') {
-        const txt = lang.startsWith('ru') ? 'Оплата подтверждена — шлагбаум откроется, можете выезжать' : lang.startsWith('ro') ? 'Plata confirmată — puteți ieși, bariera se va deschide' : 'Payment confirmed — you may exit, gate will open';
+        const txt = lang.startsWith('ru') ? 'Оплата подтверждена.' : lang.startsWith('ro') ? 'Plata confirmată.' : 'Payment confirmed.';
         return res.json({ reply: txt, sessionId: d.sessionId });
       }
       if (d.decision === 'pay_with_ticket') {

@@ -32,6 +32,18 @@ class ExitInput(BaseModel):
     phone: str | None = None
     ticket_code: str | None = None
 
+@app.get("/ai/vehicle/check")
+def vehicle_check(plate: str):
+    try:
+        r = requests.get(f"{CENTRAL_URL}/ai/vehicles/search", params={"plate": plate}, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            return {"exists": bool(data)}
+    except Exception:
+        return {"exists": False}
+    return {"exists": True}
+
+
 
 @app.post("/exit/decision")
 def exit_decision(body: ExitInput):
@@ -72,7 +84,7 @@ def exit_decision(body: ExitInput):
 
         # Paid — open immediately (only explicit paid or paid >= due)
         if status == 'paid' or (due > 0 and paid >= due):
-            return {"decision": "open_gate", "message": "Оплата подтверждена — шлагбаум откроется, можете выезжать.", "sessionId": sid}
+            return {"decision": "open_gate", "message": "Оплата подтверждена.", "sessionId": sid}
 
         # Not paid yet
         if body.has_ticket is True:
