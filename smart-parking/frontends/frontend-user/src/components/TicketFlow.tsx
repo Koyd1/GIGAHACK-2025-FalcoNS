@@ -6,6 +6,7 @@ type Stage = 'idle' | 'open' | 'closed' | 'paid'
 export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneId: number; vehicle: string; onVehicleChange: (v: string) => void }) {
   const [sessionId, setSessionId] = useState<number | null>(null)
   const [status, setStatus] = useState<string>('')
+  const [error, setError] = useState<string>('')
   const [loading, setLoading] = useState<boolean>(false)
   const [stage, setStage] = useState<Stage>('idle')
   const [amount, setAmount] = useState<number | null>(null)
@@ -51,12 +52,22 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
 
 
   const start = async () => {
+    setError('')
     setLoading(true)
     try {
-      const r = await api.post('/ai/sessions/start', { zone_id: zoneId, vehicle_plate: vehicle })
+      const plate = (vehicle || '').trim().toUpperCase()
+      if (!plate || plate.length < 4) {
+        setError('Укажите корректный номер авто (мин. 4 символа)')
+        return
+      }
+      const r = await api.post('/ai/sessions/start', { zone_id: zoneId, vehicle_plate: plate })
       setSessionId(r.data.id)
       setStatus('Открыт')
       setStage('open')
+      onVehicleChange(plate)
+    } catch (e: any) {
+      const msg = e?.response?.data?.error || e?.message || 'Ошибка'
+      setError(String(msg))
     } finally {
       setLoading(false)
     }
@@ -64,6 +75,7 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
 
   const close = async () => {
     if (!sessionId) return
+    setError('')
     setLoading(true)
     try {
       const r = await api.post(`/ai/sessions/${sessionId}/close`)
@@ -72,6 +84,9 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
       setAmount(due/100)
       setAmountCents(due)
       setStage('closed')
+    } catch (e: any) {
+      const msg = e?.response?.data?.error || e?.message || 'Ошибка'
+      setError(String(msg))
     } finally {
       setLoading(false)
     }
@@ -79,6 +94,7 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
 
   const doPay = async () => {
     if (!sessionId) return
+    setError('')
     setLoading(true)
     try {
       const r = await api.post(`/ai/sessions/${sessionId}/payments`, { method: 'card', amount_cents: amountCents || 0, approved: true })
@@ -88,6 +104,9 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
       setSessionId(null)
       setAmount(null)
       setAmountCents(null)
+    } catch (e: any) {
+      const msg = e?.response?.data?.error || e?.message || 'Ошибка'
+      setError(String(msg))
     } finally {
       setLoading(false)
     }
@@ -109,6 +128,7 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
 
   return (
     <div className="border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+      {error && <div className="mb-3 border border-red-300 bg-red-50 text-red-700 rounded p-2 text-sm">{error}</div>}
       {confirmOpen && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4 w-full max-w-sm">
