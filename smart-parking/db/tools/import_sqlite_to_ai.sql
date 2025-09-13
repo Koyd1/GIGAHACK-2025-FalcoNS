@@ -62,7 +62,7 @@ SELECT s.id,
        s.entry_time,
        s.exit_time,
        s.entry_station,
-       s.exit_station,
+       NULL::integer AS exit_station,
        CASE UPPER(s.status)
          WHEN 'OPEN' THEN 'active'
          WHEN 'ACTIVE' THEN 'active'

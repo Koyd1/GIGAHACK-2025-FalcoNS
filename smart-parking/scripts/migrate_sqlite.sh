@@ -35,42 +35,62 @@ if [[ ! -f "$INPUT_PATH" ]]; then
   exit 1
 fi
 
-PSQL_CMD=(psql ${DATABASE_URL:+"$DATABASE_URL"})
+if command -v psql >/dev/null 2>&1; then
+  PSQL_CMD=(psql ${DATABASE_URL:+"$DATABASE_URL"})
+else
+  # Fallback to running psql inside the db container
+  DBU=${POSTGRES_USER:-parking}
+  DBD=${POSTGRES_DB:-parking}
+  PSQL_CMD=(docker compose exec -T db psql -U "$DBU" -d "$DBD")
+fi
 
 echo "[1/4] Ensuring AI schema exists (run migrations if needed)"
 echo "Hint: run 'make migrate' beforehand if this fails."
 
 echo "[2/4] Cleaning ai.* tables"
-"${PSQL_CMD[@]}" -v ON_ERROR_STOP=1 -f "$TRUNCATE_AI" || true
+cat "$TRUNCATE_AI" | "${PSQL_CMD[@]}" -v ON_ERROR_STOP=1 || true
 
 echo "[3/4] Loading SQLite data into staging_sqlite.*"
 
 dump_and_filter_sql() {
   # Normalize SQLite SQL to be acceptable by Postgres in staging
-  # - Drop PRAGMA and BEGIN/COMMIT lines
-  # - Replace DATETIME -> TIMESTAMP
+  # - Drop PRAGMA and BEGIN/COMMIT lines (case-insensitive)
+  # - Replace DATETIME -> TIMESTAMP (portable, case-insensitive)
   # - Keep quoted identifiers
   sed \
-    -e '/^PRAGMA/d' \
-    -e '/^BEGIN TRANSACTION;/d' \
-    -e '/^COMMIT;/d' \
-    -e 's/\bDATETIME\b/TIMESTAMP/gi'
+    -e 's/\r$//' \
+    -e '/[Pp][Rr][Aa][Gg][Mm][Aa]/d' \
+    -e '/^[Bb][Ee][Gg][Ii][Nn][[:space:]][[:space:]]*[Tt][Rr][Aa][Nn][Ss][Aa][Cc][Tt][Ii][Oo][Nn];/d' \
+    -e '/^[Cc][Oo][Mm][Mm][Ii][Tt];/d' \
+    -e 's/[Bb][Ee][Gg][Ii][Nn][[:space:]][Tt][Rr][Aa][Nn][Ss][Aa][Cc][Tt][Ii][Oo][Nn];//g' \
+    -e 's/[Cc][Oo][Mm][Mm][Ii][Tt];//g' \
+    -e 's/[Dd][Aa][Tt][Ee][Tt][Ii][Mm][Ee]/TIMESTAMP/g' \
+    -e '/FOREIGN KEY/d' \
+    -e 's/[[:space:]]REFERENCES[^,)]*)//g' \
+    -e 's/[[:space:]]ON[[:space:]]DELETE[^,)]*//g' \
+    -e 's/[[:space:]]ON[[:space:]]UPDATE[^,)]*//g' \
+    -e 's/,[[:space:]]*)/)/g' \
+    -e '/CONSTRAINT[[:space:]].*PRIMARY KEY/s/,[[:space:]]*$//'
 }
 
 if [[ "$INPUT_TYPE" == "sql" ]]; then
-  cat "$PREAMBLE" - | dump_and_filter_sql | "${PSQL_CMD[@]}" -v ON_ERROR_STOP=1 < "$INPUT_PATH"
+  cat "$PREAMBLE" "$INPUT_PATH" | dump_and_filter_sql | "${PSQL_CMD[@]}" -v ON_ERROR_STOP=1
 else
   if command -v sqlite3 >/dev/null 2>&1; then
-    cat "$PREAMBLE" - | dump_and_filter_sql | "${PSQL_CMD[@]}" -v ON_ERROR_STOP=1 < <(sqlite3 "$INPUT_PATH" .dump)
+    {
+      cat "$PREAMBLE";
+      sqlite3 "$INPUT_PATH" .dump;
+    } | dump_and_filter_sql | "${PSQL_CMD[@]}" -v ON_ERROR_STOP=1
   else
     echo "sqlite3 not found; trying dockerized sqlite3..."
-    docker run --rm -i -v "$(pwd)":"/work" nouchka/sqlite3 sqlite3 "/work/$INPUT_PATH" .dump | \
-      (cat "$PREAMBLE" - | dump_and_filter_sql | "${PSQL_CMD[@]}" -v ON_ERROR_STOP=1)
+    {
+      cat "$PREAMBLE";
+      docker run --rm -i -v "$(pwd)":"/work" nouchka/sqlite3 sqlite3 "/work/$INPUT_PATH" .dump;
+    } | dump_and_filter_sql | "${PSQL_CMD[@]}" -v ON_ERROR_STOP=1
   fi
 fi
 
 echo "[4/4] Importing into ai.* schema"
-"${PSQL_CMD[@]}" -v ON_ERROR_STOP=1 -f "$IMPORTER"
+cat "$IMPORTER" | "${PSQL_CMD[@]}" -v ON_ERROR_STOP=1
 
 echo "Done. Verify with: curl http://localhost:8080/api/admin/sessions/open"
-
