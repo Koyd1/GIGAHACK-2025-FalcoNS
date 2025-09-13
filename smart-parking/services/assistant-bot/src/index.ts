@@ -8,6 +8,7 @@ app.use(cors());
 app.use(express.json());
 
 const CENTRAL_URL = process.env.CENTRAL_URL || 'http://central:4000';
+const AI_URL = process.env.AI_URL || 'http://ai-module:8000';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPENAI_APIKEY || '';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
@@ -19,12 +20,12 @@ const LLM_PROVIDER = (
 
 type Msg = { text: string; sessionId?: string; zoneId?: number; vehicle?: string; ticketId?: number; lang?: string };
 
-type Intent = 'start' | 'close' | 'pay' | 'status' | 'help' | 'unknown';
+type Intent = 'start' | 'close' | 'pay' | 'status' | 'help' | 'exit' | 'unknown';
 type Session = {
   pending?: {
     intent: Exclude<Intent, 'status' | 'help' | 'unknown'>;
-    needed: { vehicle?: boolean; zoneId?: boolean; ticketId?: boolean };
-    partials: { vehicle?: string; zoneId?: number; ticketId?: number };
+    needed: { vehicle?: boolean; zoneId?: boolean; ticketId?: boolean; has_ticket?: boolean; phone?: boolean };
+    partials: { vehicle?: string; zoneId?: number; ticketId?: number; has_ticket?: boolean; phone?: string };
   };
 };
 
@@ -163,11 +164,12 @@ function localIntent(text: string): Intent {
   if (/(закрыть|закрой|finish|close|stop|inchide|inchid|opreste|opri)/i.test(t)) return 'close';
   if (/(оплат|pay|payment|plateste|plati|plata)/i.test(t)) return 'pay';
   if (/(статус|status|stare)/i.test(t)) return 'status';
+  if (/(выезд|выехать|уехать|уезж|шлагбаум|шлюз|gate|exit)/i.test(t)) return 'exit';
   return 'unknown';
 }
 
 async function llmExtract(text: string, lang: string): Promise<{ intent: string; vehicle?: string; zoneId?: number; ticketId?: number } | null> {
-  const sys = `Return ONLY JSON: {"intent":"start|close|pay|status|help","vehicle"?:string,"zoneId"?:number,"ticketId"?:number}. Extract from user request. Support Russian, English, Romanian.`;
+  const sys = `Return ONLY JSON: {"intent":"start|close|pay|status|help|exit","vehicle"?:string,"zoneId"?:number,"ticketId"?:number}. Extract from user request. Support Russian, English, Romanian.`;
   const usr = `Lang=${lang}\nText=${text}`;
   try {
     if (LLM_PROVIDER === 'openai' && OPENAI_API_KEY) {
@@ -230,14 +232,6 @@ function stripZoneMentions(text: string): string {
 app.post('/assistant/message', async (req, res) => {
   const body = req.body as Msg;
   const lang = normalizeLang(body.lang);
-  const local = { start: { ru: 'Открыта парковка', en: 'Parking started', ro: 'Parcarea începută' },
-                  close: { ru: 'Закрыт билет', en: 'Ticket closed', ro: 'Bilet închis' },
-                  pay: { ru: 'Оплата успешна', en: 'Payment successful', ro: 'Plata reușită' },
-                  needTid: { ru: 'Нужен ticketId', en: 'ticketId required', ro: 'ticketId necesar' },
-                  zones: { ru: 'Доступные зоны', en: 'Available zones', ro: 'Zone disponibile' },
-                  help: { ru: 'Я могу: начать парковку, закрыть, оплатить. Скажите, например: "Начать парковку A123BC в зоне 1"', en: 'I can: start parking, close, pay. E.g., "Start parking ABC123 in zone 1"', ro: 'Pot: porni parcarea, închide, plăti. Ex.: "Pornește parcarea ABC123 în zona 1"' },
-                  unknown: { ru: 'Не понял запрос', en: 'Did not understand', ro: 'Nu am înțeles' } } as const;
-
   const rawText = body.text || '';
   const sessionId = body.sessionId || (req.headers['x-session-id'] as string) || (req.ip || 'anon');
   const sess = sessions.get(sessionId) || {} as Session;
@@ -306,120 +300,53 @@ app.post('/assistant/message', async (req, res) => {
       }
     }
 
-    if (cmd === 'start') {
+    if (cmd === 'exit') {
+      // Exit helper via AI module decision
       if (!vehicle) {
-        sessions.set(sessionId, { pending: { intent: 'start', needed: { vehicle: true, zoneId: true }, partials: {} } });
-        return res.status(400).json({ reply: lang.startsWith('ru') ? 'Уточните номер авто' : lang.startsWith('ro') ? 'Specificați numărul mașinii' : 'Please specify car plate' });
+        sessions.set(sessionId, { pending: { intent: 'exit', needed: { vehicle: true }, partials: {} } });
+        return res.status(400).json({ reply: lang.startsWith('ru') ? 'Уточните номер авто для выезда' : lang.startsWith('ro') ? 'Specificați numărul mașinii pentru ieșire' : 'Please provide car plate to exit' });
       }
-      if (!zoneId) {
-        zoneId = await zoneIdFromNameOrLetter(rawText) || zoneId;
+      // Try to parse YES/NO and phone when continuing pending flow
+      let has_ticket: boolean | undefined = (sess.pending && sess.pending.partials.has_ticket) || undefined;
+      let phone: string | undefined = (sess.pending && sess.pending.partials.phone) || undefined;
+      const tt = (rawText || '').toLowerCase();
+      if (sess.pending?.intent === 'exit') {
+        if (/(^|\s)(да|есть|yes|yep|da)($|\s)/i.test(tt)) has_ticket = true;
+        if (/(^|\s)(нет|no|nu)($|\s)/i.test(tt)) has_ticket = false;
+        const m = rawText.replace(/[^0-9]/g,'').match(/(\d{9})/);
+        if (m) phone = m[1];
       }
-      if (!zoneId) {
-        sessions.set(sessionId, { pending: { intent: 'start', needed: { zoneId: true }, partials: { vehicle } } });
-        return res.status(400).json({ reply: lang.startsWith('ru') ? 'Уточните зону парковки' : lang.startsWith('ro') ? 'Specificați zona de parcare' : 'Please specify parking zone' });
+      const d = await axios.post(`${AI_URL}/exit/decision`, { vehicle, has_ticket, phone }).then(r=>r.data);
+      if (d.decision === 'need_ticket') {
+        sessions.set(sessionId, { pending: { intent: 'exit', needed: { has_ticket: true }, partials: { vehicle } } });
+        return res.status(400).json({ reply: lang.startsWith('ru') ? 'Есть ли у вас бумажный тикет? (да/нет)' : lang.startsWith('ro') ? 'Aveți bilet tipărit? (da/nu)' : 'Do you have a paper ticket? (yes/no)' });
       }
-      const v = vehicle;
-      const z = zoneId;
-      const r = await axios.post(`${CENTRAL_URL}/ai/sessions/start`, { zone_id: z, vehicle_plate: v });
+      if (d.decision === 'need_phone') {
+        sessions.set(sessionId, { pending: { intent: 'exit', needed: { phone: true }, partials: { vehicle, has_ticket: false } } });
+        return res.status(400).json({ reply: lang.startsWith('ru') ? 'Укажите номер телефона (9 цифр) для оплаты по ссылке' : lang.startsWith('ro') ? 'Indicați numărul de telefon (9 cifre) pentru plată prin link' : 'Provide phone number (9 digits) for payment link' });
+      }
       sessions.delete(sessionId);
-      const txt = lang.startsWith('ru') ? `${local.start.ru} для ${v} в зоне ${z}. Session: ${r.data.id}` : lang.startsWith('ro') ? `${local.start.ro} pentru ${v} în zona ${z}. Sesiune: ${r.data.id}` : `${local.start.en} for ${v} in zone ${z}. Session: ${r.data.id}`;
-      return res.json({ reply: txt, sessionId: r.data.id, vehicle: v, zoneId: z });
-    }
-    if (cmd === 'close') {
-      if (!ticketId) {
-        // Try to parse ticket id directly from text
-        const m = rawText.match(/\b(\d{1,8})\b/);
-        if (m) ticketId = Number(m[1]);
-        // Try resolve by vehicle
-        if (vehicle) {
-          const found = await findOpenByVehicle(vehicle);
-          if (found) ticketId = found;
-        }
-        sessions.set(sessionId, { pending: { intent: 'close', needed: { ticketId: true }, partials: {} } });
-        if (!ticketId) return res.status(400).json({ reply: local.needTid[lang.startsWith('ro') ? 'ro' : lang.startsWith('en') ? 'en' : 'ru'] });
+      if (d.decision === 'open_gate') {
+        const txt = lang.startsWith('ru') ? 'Оплата подтверждена — шлагбаум откроется, можете выезжать' : lang.startsWith('ro') ? 'Plata confirmată — puteți ieși, bariera se va deschide' : 'Payment confirmed — you may exit, gate will open';
+        return res.json({ reply: txt, sessionId: d.sessionId });
       }
-      const id = Number(ticketId);
-      const r = await axios.post(`${CENTRAL_URL}/ai/sessions/${id}/close`);
-      sessions.delete(sessionId);
-      const amountCents = Number(r.data.amount_due_cents || 0);
-      const amount = (amountCents / 100).toFixed(2);
-      const txt = lang.startsWith('ru') ? `${local.close.ru} ${id}. Сумма: ${amount}` : lang.startsWith('ro') ? `${local.close.ro} ${id}. Sumă: ${amount}` : `${local.close.en} ${id}. Amount: ${amount}`;
-      return res.json({ reply: txt, sessionId: id, amount });
-    }
-    if (cmd === 'pay') {
-      if (!ticketId) {
-        // Try to parse ticket id directly from text
-        const m = rawText.match(/\b(\d{1,8})\b/);
-        if (m) ticketId = Number(m[1]);
-        // Try resolve by vehicle, and close before payment if needed
-        if (vehicle) {
-          const found = await findOpenByVehicle(vehicle);
-          if (found) {
-            try { await axios.post(`${CENTRAL_URL}/ai/sessions/${found}/close`); } catch {}
-            ticketId = found;
-          } else {
-            const latest = await findLatestByVehicle(vehicle);
-            if (latest) ticketId = latest;
-          }
-        }
-        sessions.set(sessionId, { pending: { intent: 'pay', needed: { ticketId: true }, partials: {} } });
-        if (!ticketId) return res.status(400).json({ reply: local.needTid[lang.startsWith('ro') ? 'ro' : lang.startsWith('en') ? 'en' : 'ru'] });
+      if (d.decision === 'pay_with_ticket') {
+        const txt = lang.startsWith('ru') ? 'Оплатите по коду с бумажного тикета на терминале, после этого шлагбаум откроется' : lang.startsWith('ro') ? 'Plătiți la terminal cu codul de pe biletul tipărit, apoi bariera se va deschide' : 'Pay at the terminal with the paper ticket code, then the gate will open';
+        return res.json({ reply: txt, sessionId: d.sessionId });
       }
-      const id = Number(ticketId);
-      // Pay in AI schema (assume card, approve true). Try full due; if unknown, default demo amount
-      let dueCents = 0;
-      try {
-        const s = await axios.get(`${CENTRAL_URL}/ai/sessions/latest`, { params: { vehicle } });
-        dueCents = Number(s.data?.amount_due_cents || 0);
-      } catch {}
-      if (!dueCents) { try { await axios.post(`${CENTRAL_URL}/ai/sessions/${id}/close`); } catch {} }
-      const r = await axios.post(`${CENTRAL_URL}/ai/sessions/${id}/payments`, { method: 'card', amount_cents: dueCents || 50000, approved: true });
-      sessions.delete(sessionId);
-      const pid = r.data.payment?.id || r.data.payment?.provider_payment_id || r.data.payment?.paymentId;
-      const txt = lang.startsWith('ru') ? `${local.pay.ru}. Платёж ${pid}` : lang.startsWith('ro') ? `${local.pay.ro}. Plata ${pid}` : `${local.pay.en}. Payment ${pid}`;
-      return res.json({ reply: txt, sessionId: id, paymentId: pid });
-    }
-    if (cmd === 'status') {
-      try {
-        const [zones, rates] = await Promise.all([
-          axios.get(`${CENTRAL_URL}/zones`).then(r=>r.data as any[]),
-          axios.get(`${CENTRAL_URL}/rates`).then(r=>r.data as any[])
-        ]);
-        const byZone: Record<string, { price_per_hour: string; currency: string }> = {};
-        for (const it of rates) {
-          byZone[String(it.zone_name)] = { price_per_hour: String(it.price_per_hour), currency: String(it.currency) };
-        }
-        const parts: string[] = [];
-        for (const z of zones) {
-          const r = byZone[String(z.name)];
-          if (r) parts.push(`${z.name}: ${r.price_per_hour} ${r.currency}/час`);
-        }
-        const msgRU = parts.length ? `Тарифы по зонам — ${parts.join('; ')}. Итоговая сумма зависит от времени и динамического множителя.` : `Доступные зоны: ${zones.map(z=>z.name).join(', ')}`;
-        const msgEN = parts.length ? `Rates — ${parts.join('; ').replace('/час','/h')}. Final price depends on time and dynamic multiplier.` : `Available zones: ${zones.map(z=>z.name).join(', ')}`;
-        const msgRO = parts.length ? `Tarife — ${parts.join('; ').replace('/час','/h')}. Prețul depinde de timp și multiplicator dinamic.` : `Zone disponibile: ${zones.map(z=>z.name).join(', ')}`;
-        const txt = lang.startsWith('ru') ? msgRU : lang.startsWith('ro') ? msgRO : msgEN;
-        sessions.delete(sessionId);
-        return res.json({ reply: txt });
-      } catch {
-        const r = await axios.get(`${CENTRAL_URL}/zones`);
-        sessions.delete(sessionId);
-        const list = r.data.map((z: any)=>z.name).join(', ');
-        const txt = lang.startsWith('ru') ? `${local.zones.ru}: ${list}` : lang.startsWith('ro') ? `${local.zones.ro}: ${list}` : `${local.zones.en}: ${list}`;
-        return res.json({ reply: txt });
+      if (d.decision === 'sms_link_sent') {
+        const txt = lang.startsWith('ru') ? 'Ссылка для оплаты отправлена — завершите оплату и выезжайте' : lang.startsWith('ro') ? 'Linkul de plată a fost trimis — finalizați plata și ieșiți' : 'Payment link sent — complete payment and exit';
+        return res.json({ reply: txt, sessionId: d.sessionId });
       }
+      if (d.decision === 'not_found') {
+        return res.status(400).json({ reply: lang.startsWith('ru') ? 'Сессия не найдена. Проверьте номер или укажите ticketId' : lang.startsWith('ro') ? 'Sesiune negăsită. Verificați numărul sau indicați ticketId' : 'Session not found. Check plate or provide ticketId' });
+      }
+      return res.json({ reply: d.message || 'OK' });
     }
-    if (cmd === 'help') {
-      sessions.delete(sessionId);
-      const txt = local.help[lang.startsWith('ro') ? 'ro' : lang.startsWith('en') ? 'en' : 'ru'];
-      return res.json({ reply: txt });
-    }
-    const txt = local.unknown[lang.startsWith('ro') ? 'ro' : lang.startsWith('en') ? 'en' : 'ru'];
-    return res.json({ reply: `${txt}. ${local.help[lang.startsWith('ro') ? 'ro' : lang.startsWith('en') ? 'en' : 'ru']}` });
   } catch (e: any) {
     const msg = e?.response?.data || e?.message || 'error';
     return res.status(500).json({ reply: 'Ошибка обработки', error: msg });
   }
 });
-
 const port = parseInt(process.env.PORT || '5005', 10);
 app.listen(port, () => console.log(`assistant-bot on ${port}`));

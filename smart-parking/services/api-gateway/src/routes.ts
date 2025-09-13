@@ -89,11 +89,14 @@ router.post('/admin/sessions/:id/close', wrap(async (req, res) => {
   res.json(r.data);
 }));
 
-// Assistant proxy
-router.post('/assistant/message', wrap(async (req, res) => {
-  const qs = new URLSearchParams(req.query as any).toString();
-  const url = `${config.assistantUrl}/assistant/message${qs ? `?${qs}` : ''}`;
-  const r = await axios.post(url, req.body);
+// AI Exit decision proxy (to ai-module)
+router.post('/ai/exit/decision', wrap(async (req, res) => {
+  const r = await axios.post(`${config.aiUrl}/exit/decision`, req.body);
+  res.json(r.data);
+}));
+
+router.post('/ai/exit/understand', wrap(async (req, res) => {
+  const r = await axios.post(`${config.aiUrl}/exit/understand`, req.body);
   res.json(r.data);
 }));
 
@@ -143,6 +146,10 @@ router.get('/ai/sessions/search', wrap(async (req, res) => {
 }));
 router.get('/ai/sessions/latest', wrap(async (req, res) => {
   const r = await axios.get(`${config.centralUrl}/ai/sessions/latest`, { params: { vehicle: req.query.vehicle } });
+  res.json(r.data);
+}));
+router.get('/ai/sessions/by-ticket', wrap(async (req, res) => {
+  const r = await axios.get(`${config.centralUrl}/ai/sessions/by-ticket`, { params: { code: req.query.code } });
   res.json(r.data);
 }));
 router.post('/ai/sessions/start', wrap(async (req, res) => {

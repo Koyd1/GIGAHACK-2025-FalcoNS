@@ -41,14 +41,21 @@ registry.registerPath({
 registry.registerPath({
   method: 'post',
   path: '/api/tickets/{id}/close',
-  pathParams: z.object({ id: z.string() }),
+  request: { params: z.object({ id: z.string() }) },
   responses: { 200: { description: 'Closed', content: { 'application/json': { schema: Ticket } } } }
 });
 
 registry.registerPath({
   method: 'post',
+  path: '/api/tickets/{id}/waiting',
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: { description: 'Waiting', content: { 'application/json': { schema: Ticket } } } }
+});
+
+registry.registerPath({
+  method: 'post',
   path: '/api/payments/{ticketId}/pay',
-  pathParams: z.object({ ticketId: z.string() }),
+  request: { params: z.object({ ticketId: z.string() }) },
   responses: { 200: { description: 'Paid', content: { 'application/json': { schema: z.object({ payment: Payment, ticket: Ticket }).partial() } } } }
 });
 

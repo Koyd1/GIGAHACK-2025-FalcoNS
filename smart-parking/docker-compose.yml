@@ -68,26 +68,13 @@ services:
   ai-module:
     build:
       context: ./services/ai-module
+    env_file:
+      - .env
     environment:
       PORT: 8000
     ports:
       - "8000:8000"
 
-  assistant-bot:
-    build:
-      context: ./services/assistant-bot
-    env_file:
-      - .env
-    environment:
-      PORT: 5005
-      CENTRAL_URL: http://central:4000
-    depends_on:
-      central:
-        condition: service_started
-    ports:
-      - "5005:5005"
-    volumes:
-      - ./services/assistant-bot:/app
 
   iot-simulator:
     build:
@@ -128,4 +115,3 @@ services:
 
 volumes:
   db-data:
-

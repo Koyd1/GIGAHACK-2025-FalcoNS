@@ -101,6 +101,23 @@ router.get('/ai/sessions/latest', async (req, res) => {
   res.json(r.rows[0]);
 });
 
+// Find session by ticket code (latest)
+router.get('/ai/sessions/by-ticket', async (req, res) => {
+  const code = String((req.query.code || '').toString()).trim();
+  if (!code) return res.status(400).json({ error: 'code required' });
+  const r = await query(
+    `SELECT s.*
+     FROM ai.session s
+     JOIN ai.ticket t ON t.id = s.ticket_id
+     WHERE UPPER(t.code) = UPPER($1)
+     ORDER BY s.entry_time DESC NULLS LAST
+     LIMIT 1`,
+    [code]
+  );
+  if (r.rowCount === 0) return res.status(404).json({ error: 'not_found' });
+  res.json(r.rows[0]);
+});
+
 // Start session (simplified): ensure vehicle/ticket optional
 router.post('/ai/sessions/start', async (req, res) => {
   const { zone_id, zone_name, vehicle_plate, ticket_code, entry_station_id } = req.body || {};
@@ -217,10 +234,11 @@ router.post('/ai/sessions/:id/close', async (req, res) => {
   const r = await query(`
     UPDATE ai.session
        SET exit_time = NOW(),
-           status = 'closed',
+           status = CASE WHEN $1 = 0 THEN 'paid' ELSE 'closed' END,
            amount_due_cents = $1,
            exit_station = COALESCE($2, exit_station),
-           licence_plate_exit = COALESCE(UPPER($3), licence_plate_exit)
+           licence_plate_exit = COALESCE(UPPER($3), licence_plate_exit),
+           paid_until = CASE WHEN $1 = 0 THEN NOW() ELSE paid_until END
      WHERE id = $4
      RETURNING *
   `, [due, exit_station_id || null, (licence_plate_exit || null), id]);
@@ -251,6 +269,22 @@ router.post('/ai/sessions/:id/payments', async (req, res) => {
   // Event
   await query(`INSERT INTO ai.event (session_id, station_id, type, occurred_at, payload_json) VALUES ($1, $2, $3, NOW(), $4)`, [id, station_id || null, approved ? 'payment_success' : 'payment_attempt', JSON.stringify({ amount_cents, method: m, approved: !!approved, processor_ref: processor_ref || null })]);
   res.status(201).json({ payment: pr.rows[0] });
+});
+
+// Allow late payment for a session (mark 48h window)
+router.post('/ai/sessions/:id/late-payment', async (req, res) => {
+  const id = Number(req.params.id);
+  const hours = Math.max(1, Number((req.body || {}).hours || 48));
+  const method = String(((req.body || {}).method || 'qr')).toLowerCase();
+  const r = await query('UPDATE ai.session SET late_payment_due_at = NOW() + ($1 || \n' +
+    "' hours')::interval WHERE id=$2 RETURNING id, late_payment_due_at", [hours, id]);
+  if (r.rowCount === 0) return res.status(404).json({ error: 'not_found' });
+  await query(
+    `INSERT INTO ai.event (session_id, type, occurred_at, payload_json)
+     VALUES ($1, 'late_payment_granted', NOW(), $2)`,
+    [id, JSON.stringify({ hours, method })]
+  );
+  res.json({ id, late_payment_due_at: r.rows[0].late_payment_due_at });
 });
 
 export default router;

@@ -49,23 +49,56 @@ export default router;
  
 // Reports
 router.get('/admin/reports', async (_req, res) => {
-  // AI-only: revenue by zone from approved payments
+  // Revenue by zone: combine AI payments (approved) and legacy public payments (status success)
   const revenue = await query(
-    `SELECT z.name as zone, COALESCE(SUM(p.amount_cents), 0) / 100.0 as revenue
-     FROM ai.zone z
-     LEFT JOIN ai.session s ON s.zone_id = z.id
-     LEFT JOIN ai.payment p ON p.session_id = s.id AND p.approved = true
-     GROUP BY z.name
-     ORDER BY z.name`
+    `WITH ai_rev AS (
+       SELECT z.name AS zone, COALESCE(SUM(p.amount_cents), 0)::numeric / 100.0 AS revenue
+       FROM ai.zone z
+       LEFT JOIN ai.session s ON s.zone_id = z.id
+       LEFT JOIN ai.payment p ON p.session_id = s.id AND p.approved = true
+       GROUP BY z.name
+     ),
+     public_rev AS (
+       SELECT z.name AS zone, COALESCE(SUM(p.amount), 0)::numeric AS revenue
+       FROM zones z
+       LEFT JOIN tickets t ON t.zone_id = z.id
+       LEFT JOIN payments p ON p.ticket_id = t.id AND p.status = 'success'
+       GROUP BY z.name
+     )
+     SELECT zone, SUM(revenue) AS revenue
+     FROM (
+       SELECT * FROM ai_rev
+       UNION ALL
+       SELECT * FROM public_rev
+     ) u
+     GROUP BY zone
+     ORDER BY zone`
   );
-  // AI-only: open sessions count by zone
+
+  // Open counts by zone: combine AI active sessions and legacy open tickets
   const open = await query(
-    `SELECT z.name as zone, COUNT(s.id) as open
-     FROM ai.zone z
-     LEFT JOIN ai.session s ON s.zone_id = z.id AND s.status = 'active'
-     GROUP BY z.name
-     ORDER BY z.name`
+    `WITH ai_open AS (
+       SELECT z.name AS zone, COUNT(s.id)::int AS open
+       FROM ai.zone z
+       LEFT JOIN ai.session s ON s.zone_id = z.id AND s.status = 'active'
+       GROUP BY z.name
+     ),
+     public_open AS (
+       SELECT z.name AS zone, COUNT(t.id)::int AS open
+       FROM zones z
+       LEFT JOIN tickets t ON t.zone_id = z.id AND t.status = 'open'
+       GROUP BY z.name
+     )
+     SELECT zone, SUM(open)::int AS open
+     FROM (
+       SELECT * FROM ai_open
+       UNION ALL
+       SELECT * FROM public_open
+     ) u
+     GROUP BY zone
+     ORDER BY zone`
   );
+
   res.json({ revenueByZone: revenue.rows, openTicketsByZone: open.rows });
 });
 
@@ -186,4 +219,82 @@ router.post('/admin/sessions/:id/close', async (req, res) => {
   })]);
   await query(`INSERT INTO ai.event (session_id, type, occurred_at, payload_json) VALUES ($1, $2, NOW(), $3)`, [id, 'info', JSON.stringify({ reason: 'closed_by_admin', amount_due_cents: due })]);
   return res.json(ur.rows[0]);
+});
+
+
+
+// Close session by car number (new route)
+router.post('/sessions/close-by-car', async (req, res) => {
+  const { car_number, ticket_status, phone_number } = req.body;
+
+  if (!car_number || !phone_number) {
+    return res.status(400).json({ error: 'Car number and phone number are required' });
+  }
+
+  try {
+    // Find active session by car number
+    const sessionResult = await query(
+      `SELECT * FROM ai.session WHERE car_number = $1 AND status = 'active'`,
+      [car_number]
+    );
+
+    if (sessionResult.rowCount === 0) {
+      return res.status(404).json({ error: 'Active session not found for the given car number' });
+    }
+
+    const session = sessionResult.rows[0];
+
+    // Check if the session is paid
+    if (session.payment_status !== 'paid') {
+      return res.status(400).json({ error: 'Session must be paid before closing' });
+    }
+
+    // Update session status to closed
+    const updateResult = await query(
+      `UPDATE ai.session SET status = 'closed', phone_number = $1 WHERE id = $2 RETURNING *`,
+      [phone_number, session.id]
+    );
+
+    return res.json(updateResult.rows[0]);
+  } catch (error) {
+    console.error('Error closing session:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Update session to waiting status by car number
+router.post('/sessions/waiting-by-car', async (req, res) => {
+  const { car_number, phone_number } = req.body;
+
+  if (!car_number || !phone_number) {
+    return res.status(400).json({ error: 'Car number and phone number are required' });
+  }
+
+  try {
+    console.log('Received request:', { car_number, phone_number });
+
+    // Update session status to waiting
+    const updateResult = await query(
+      `UPDATE ai.session
+       SET status = 'waiting', phone_number = $1, late_payment_due_at = NOW() + INTERVAL '48 HOURS'
+       WHERE status = 'active' AND vehicle_id IN (
+         SELECT id FROM ai.vehicle WHERE plate = $2
+       ) RETURNING *`,
+      [phone_number, car_number]
+    );
+
+    console.log('Update result:', updateResult.rows);
+
+    if (updateResult.rowCount === 0) {
+      return res.status(404).json({ error: 'No active session found for the given car number' });
+    }
+
+    return res.json({
+      message: 'Barrier will open. Payment link sent to the provided phone number.',
+      session: updateResult.rows[0],
+    });
+  } catch (error) {
+    console.error('Error updating session to waiting:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 });

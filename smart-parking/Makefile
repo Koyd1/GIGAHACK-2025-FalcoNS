@@ -41,12 +41,12 @@ import-sqlite:
 
 # Load data + restart app services so UIs see fresh data
 load-data: import-sqlite
-	$(DOCKER_COMPOSE) restart central api-gateway frontend-user frontend-admin assistant-bot
+	$(DOCKER_COMPOSE) restart central api-gateway frontend-user frontend-admin
 	@echo "Data loaded. Verify: curl http://localhost:8080/api/admin/sessions/open"
 
 # Full reload helper: reset containers, import, restart
 reload-data:
 	$(MAKE) reset
 	$(MAKE) import-sqlite
-	$(DOCKER_COMPOSE) restart central api-gateway frontend-user frontend-admin assistant-bot
+	$(DOCKER_COMPOSE) restart central api-gateway frontend-user frontend-admin
 	@echo "Reload complete."
