@@ -130,9 +130,24 @@ router.post('/ai/sessions/start', async (req, res) => {
 // Compute due and close session using simple tariff (first tariff row)
 router.post('/ai/sessions/:id/close', async (req, res) => {
   const id = Number(req.params.id);
-  const tr = await query(`SELECT s.*, t.free_minutes, t.rate_cents_per_hour, t.max_daily_cents FROM ai.session s CROSS JOIN LATERAL (
-      SELECT free_minutes, rate_cents_per_hour, max_daily_cents FROM ai.tariff ORDER BY id LIMIT 1
-    ) t WHERE s.id=$1`, [id]);
+  const tr = await query(`
+    WITH desired AS (
+      SELECT CASE WHEN EXTRACT(DOW FROM NOW())::int BETWEEN 1 AND 5 THEN 'weekday' ELSE 'weekend' END AS d
+    )
+    SELECT s.*, t.id AS tariff_id, t.name AS tariff_name,
+           t.free_minutes, t.rate_cents_per_hour, t.max_daily_cents
+    FROM ai.session s
+    CROSS JOIN LATERAL (
+      SELECT id, name, free_minutes, rate_cents_per_hour, max_daily_cents, applies_on
+      FROM ai.tariff, desired
+      ORDER BY
+        (applies_on <> (SELECT d FROM desired)) ASC,
+        (applies_on <> 'always') ASC,
+        id ASC
+      LIMIT 1
+    ) t
+    WHERE s.id=$1
+  `, [id]);
   if (tr.rowCount === 0) return res.status(404).json({ error: 'session not found' });
   const s = tr.rows[0];
   const startMs = new Date(s.entry_time).getTime();
@@ -142,6 +157,14 @@ router.post('/ai/sessions/:id/close', async (req, res) => {
   const hours = Math.ceil(billable / 60);
   const base = hours * Number(s.rate_cents_per_hour || 0);
   const due = Math.min(base, Number(s.max_daily_cents || base));
+  // Log which tariff was applied
+  await query(`INSERT INTO ai.event (session_id, type, occurred_at, payload_json) VALUES ($1, 'tariff_applied', NOW(), $2)`, [id, JSON.stringify({
+    tariff_id: s.tariff_id,
+    tariff_name: s.tariff_name,
+    free_minutes: s.free_minutes,
+    rate_cents_per_hour: s.rate_cents_per_hour,
+    max_daily_cents: s.max_daily_cents
+  })]);
   const r = await query(`UPDATE ai.session SET exit_time=NOW(), status='closed', amount_due_cents=$1 WHERE id=$2 RETURNING *`, [due, id]);
   await query(`INSERT INTO ai.event (session_id, type, occurred_at, payload_json) VALUES ($1, $2, NOW(), $3)`, [id, 'info', JSON.stringify({ reason: 'closed', amount_due_cents: due })]);
   res.json(r.rows[0]);
@@ -167,3 +190,44 @@ router.post('/ai/sessions/:id/payments', async (req, res) => {
 });
 
 export default router;
+
+// Tariff management (for AI assistant / admin UI)
+router.get('/ai/tariffs', async (_req, res) => {
+  const r = await query(`SELECT id, name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents FROM ai.tariff ORDER BY id`);
+  res.json(r.rows);
+});
+
+router.post('/ai/tariffs', async (req, res) => {
+  const { name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const a = (applies_on || 'custom').toString().toLowerCase();
+  if (!['always','weekday','weekend','custom'].includes(a)) return res.status(400).json({ error: 'invalid applies_on' });
+  const r = await query(
+    `INSERT INTO ai.tariff (name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents)
+     VALUES ($1, $2, COALESCE($3,0), COALESCE($4,0), $5)
+     RETURNING id, name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents`,
+    [String(name), a, free_minutes != null ? Number(free_minutes) : 0, rate_cents_per_hour != null ? Number(rate_cents_per_hour) : 0, max_daily_cents != null ? Number(max_daily_cents) : null]
+  );
+  res.status(201).json(r.rows[0]);
+});
+
+router.put('/ai/tariffs/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const { name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents } = req.body || {};
+  const sets: string[] = [];
+  const vals: any[] = [];
+  if (name != null) { sets.push(`name=$${sets.length+1}`); vals.push(String(name)); }
+  if (applies_on != null) {
+    const a = String(applies_on).toLowerCase();
+    if (!['always','weekday','weekend','custom'].includes(a)) return res.status(400).json({ error: 'invalid applies_on' });
+    sets.push(`applies_on=$${sets.length+1}`); vals.push(a);
+  }
+  if (free_minutes != null) { sets.push(`free_minutes=$${sets.length+1}`); vals.push(Number(free_minutes)); }
+  if (rate_cents_per_hour != null) { sets.push(`rate_cents_per_hour=$${sets.length+1}`); vals.push(Number(rate_cents_per_hour)); }
+  if (max_daily_cents !== undefined) { sets.push(`max_daily_cents=$${sets.length+1}`); vals.push(max_daily_cents != null ? Number(max_daily_cents) : null); }
+  if (sets.length === 0) return res.status(400).json({ error: 'nothing to update' });
+  vals.push(id);
+  const r = await query(`UPDATE ai.tariff SET ${sets.join(', ')} WHERE id=$${sets.length+1} RETURNING id, name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents`, vals);
+  if (r.rowCount === 0) return res.status(404).json({ error: 'not_found' });
+  res.json(r.rows[0]);
+});

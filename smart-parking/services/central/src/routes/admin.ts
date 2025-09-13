@@ -94,8 +94,19 @@ router.get('/admin/sessions/open', async (_req, res) => {
   }
 
   // 2) AI sessions (voice flow)
-  const rTariff = await query(`SELECT free_minutes, rate_cents_per_hour, max_daily_cents FROM ai.tariff ORDER BY id LIMIT 1`);
-  const aiTariff = rTariff.rows[0] || { free_minutes: 0, rate_cents_per_hour: 1000, max_daily_cents: null };
+  const rTariff = await query(`
+    WITH desired AS (
+      SELECT CASE WHEN EXTRACT(DOW FROM NOW())::int BETWEEN 1 AND 5 THEN 'weekday' ELSE 'weekend' END AS d
+    )
+    SELECT id, name, free_minutes, rate_cents_per_hour, max_daily_cents, applies_on
+    FROM ai.tariff, desired
+    ORDER BY
+      (applies_on <> (SELECT d FROM desired)) ASC,
+      (applies_on <> 'always') ASC,
+      id ASC
+    LIMIT 1
+  `);
+  const aiTariff = rTariff.rows[0] || { id: null, name: 'Default', free_minutes: 0, rate_cents_per_hour: 1000, max_daily_cents: null };
   const rAi = await query(
     `SELECT s.id,
             COALESCE(v.plate, '—') as vehicle,
@@ -145,8 +156,19 @@ router.post('/admin/sessions/:id/close', async (req, res) => {
   const sr = await query('SELECT * FROM ai.session WHERE id=$1 AND status=\'active\'', [id]);
   if (sr.rowCount === 0) return res.status(404).json({ error: 'session not found' });
   const s = sr.rows[0];
-  const tfr = await query(`SELECT free_minutes, rate_cents_per_hour, max_daily_cents FROM ai.tariff ORDER BY id LIMIT 1`);
-  const tariff = tfr.rows[0] || { free_minutes: 0, rate_cents_per_hour: 1000, max_daily_cents: null };
+  const tfr = await query(`
+    WITH desired AS (
+      SELECT CASE WHEN EXTRACT(DOW FROM NOW())::int BETWEEN 1 AND 5 THEN 'weekday' ELSE 'weekend' END AS d
+    )
+    SELECT id, name, free_minutes, rate_cents_per_hour, max_daily_cents, applies_on
+    FROM ai.tariff, desired
+    ORDER BY
+      (applies_on <> (SELECT d FROM desired)) ASC,
+      (applies_on <> 'always') ASC,
+      id ASC
+    LIMIT 1
+  `);
+  const tariff = tfr.rows[0] || { id: null, name: 'Default', free_minutes: 0, rate_cents_per_hour: 1000, max_daily_cents: null };
   const startMs = s.entry_time ? new Date(s.entry_time as any).getTime() : Date.now();
   const endMs = Date.now();
   const totalMinutes = Math.max(0, Math.round((endMs - startMs) / 60000));
@@ -155,6 +177,13 @@ router.post('/admin/sessions/:id/close', async (req, res) => {
   const base = hours * Number(tariff.rate_cents_per_hour || 0);
   const due = tariff.max_daily_cents ? Math.min(base, Number(tariff.max_daily_cents)) : base;
   const ur = await query(`UPDATE ai.session SET exit_time=NOW(), status='closed', amount_due_cents=$1 WHERE id=$2 RETURNING *`, [due, id]);
+  await query(`INSERT INTO ai.event (session_id, type, occurred_at, payload_json) VALUES ($1, 'tariff_applied', NOW(), $2)`, [id, JSON.stringify({
+    tariff_id: tariff.id,
+    tariff_name: tariff.name,
+    free_minutes: tariff.free_minutes,
+    rate_cents_per_hour: tariff.rate_cents_per_hour,
+    max_daily_cents: tariff.max_daily_cents
+  })]);
   await query(`INSERT INTO ai.event (session_id, type, occurred_at, payload_json) VALUES ($1, $2, NOW(), $3)`, [id, 'info', JSON.stringify({ reason: 'closed_by_admin', amount_due_cents: due })]);
   return res.json(ur.rows[0]);
 });

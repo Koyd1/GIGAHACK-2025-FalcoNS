@@ -26,6 +26,22 @@ AI schema (docs alignment)
   
 Note: existing services still use `public.*` tables; `ai.*` runs side‑by‑side without breaking anything.
 
+Tariff model
+- Table `ai.tariff` defines pricing rules (replaces zone-based pricing in AI flow):
+  - `id`: PK.
+  - `name` (TEXT, unique, required): human-readable tariff name.
+  - `applies_on` (weekdays/weekend/always/custom): auto-selects current tariff.
+  - `free_minutes` (INT ≥ 0): grace period before billing.
+  - `rate_cents_per_hour` (INT ≥ 0): hourly rate in cents, prorated by minutes.
+  - `max_daily_cents` (INT ≥ 0, nullable): daily cap; final charge never exceeds this per 24h.
+- Central auto-applies tariff by day type: on Mon–Fri picks `weekday`, on Sat–Sun picks `weekend`; if missing, falls back to `always`.
+- Events record applied tariff (`tariff_applied`) on session close for audit.
+
+Tariffs API (for AI-assistant)
+- `GET /ai/tariffs` — list all tariffs.
+- `POST /ai/tariffs` — create a tariff: `{ name, applies_on?: 'weekday'|'weekend'|'always'|'custom', free_minutes?: number, rate_cents_per_hour?: number, max_daily_cents?: number|null }`.
+- `PUT /ai/tariffs/:id` — update any fields above.
+
 Run locally
 - Requirements: Docker + Docker Compose.
 - Copy `.env.example` to `.env` (optional) and tune variables.
