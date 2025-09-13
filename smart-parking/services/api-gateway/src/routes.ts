@@ -109,3 +109,69 @@ router.post('/admin/incidents/:id/resolve', wrap(async (req, res) => {
 }));
 
 export default router;
+ 
+// AI schema proxies
+router.get('/ai/tariffs', wrap(async (_req, res) => {
+  const r = await axios.get(`${config.centralUrl}/ai/tariffs`);
+  res.json(r.data);
+}));
+
+router.post('/ai/tariffs', wrap(async (req, res) => {
+  const r = await axios.post(`${config.centralUrl}/ai/tariffs`, req.body);
+  res.json(r.data);
+}));
+
+router.put('/ai/tariffs/:id', wrap(async (req, res) => {
+  const r = await axios.put(`${config.centralUrl}/ai/tariffs/${req.params.id}`, req.body);
+  res.json(r.data);
+}));
+
+router.delete('/ai/tariffs/:id', wrap(async (req, res) => {
+  const r = await axios.delete(`${config.centralUrl}/ai/tariffs/${req.params.id}`);
+  res.json(r.data);
+}));
+
+router.get('/ai/zones', wrap(async (_req, res) => {
+  const r = await axios.get(`${config.centralUrl}/ai/zones`);
+  res.json(r.data);
+}));
+
+// AI sessions
+router.get('/ai/sessions/search', wrap(async (req, res) => {
+  const r = await axios.get(`${config.centralUrl}/ai/sessions/search`, { params: { vehicle: req.query.vehicle } });
+  res.json(r.data);
+}));
+router.get('/ai/sessions/latest', wrap(async (req, res) => {
+  const r = await axios.get(`${config.centralUrl}/ai/sessions/latest`, { params: { vehicle: req.query.vehicle } });
+  res.json(r.data);
+}));
+router.post('/ai/sessions/start', wrap(async (req, res) => {
+  const r = await axios.post(`${config.centralUrl}/ai/sessions/start`, req.body);
+  res.json(r.data);
+}));
+router.post('/ai/sessions/:id/close', wrap(async (req, res) => {
+  const r = await axios.post(`${config.centralUrl}/ai/sessions/${req.params.id}/close`);
+  res.json(r.data);
+}));
+router.post('/ai/sessions/:id/payments', wrap(async (req, res) => {
+  const r = await axios.post(`${config.centralUrl}/ai/sessions/${req.params.id}/payments`, req.body);
+  res.json(r.data);
+}));
+
+// AI discounts/vouchers
+router.get('/ai/discount-rules', wrap(async (_req, res) => {
+  const r = await axios.get(`${config.centralUrl}/ai/discount-rules`);
+  res.json(r.data);
+}));
+router.post('/ai/discount-rules', wrap(async (req, res) => {
+  const r = await axios.post(`${config.centralUrl}/ai/discount-rules`, req.body);
+  res.json(r.data);
+}));
+router.get('/ai/vouchers', wrap(async (_req, res) => {
+  const r = await axios.get(`${config.centralUrl}/ai/vouchers`);
+  res.json(r.data);
+}));
+router.post('/ai/vouchers', wrap(async (req, res) => {
+  const r = await axios.post(`${config.centralUrl}/ai/vouchers`, req.body);
+  res.json(r.data);
+}));

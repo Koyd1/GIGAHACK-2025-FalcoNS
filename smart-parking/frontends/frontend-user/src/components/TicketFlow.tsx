@@ -4,11 +4,12 @@ import { api } from '../api'
 type Stage = 'idle' | 'open' | 'closed' | 'paid'
 
 export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneId: number; vehicle: string; onVehicleChange: (v: string) => void }) {
-  const [ticketId, setTicketId] = useState<number | null>(null)
+  const [sessionId, setSessionId] = useState<number | null>(null)
   const [status, setStatus] = useState<string>('')
   const [loading, setLoading] = useState<boolean>(false)
   const [stage, setStage] = useState<Stage>('idle')
   const [amount, setAmount] = useState<number | null>(null)
+  const [amountCents, setAmountCents] = useState<number | null>(null)
   const [confirmOpen, setConfirmOpen] = useState<boolean>(false)
 
   // Sync with assistant events (opened/closed/paid)
@@ -16,7 +17,7 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
     const onOpened = (e: any) => {
       const d = e?.detail || {}
       if (typeof d.ticketId === 'number') {
-        setTicketId(d.ticketId)
+        setSessionId(d.ticketId)
         setStage('open')
         setStatus('Открыт')
         if (d.vehicle) onVehicleChange(String(d.vehicle))
@@ -25,7 +26,7 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
     const onClosed = (e: any) => {
       const d = e?.detail || {}
       if (typeof d.ticketId === 'number') {
-        setTicketId(d.ticketId)
+        setSessionId(d.ticketId)
         setStage('closed')
         setStatus(`Закрыт, сумма: ${d.amount ?? ''}`)
       }
@@ -35,7 +36,7 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
       if (typeof d.ticketId === 'number') {
         setStage('paid')
         setStatus('Оплачен')
-        setTicketId(null)
+        setSessionId(null)
       }
     }
     window.addEventListener('ticket:opened', onOpened as EventListener)
@@ -52,8 +53,8 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
   const start = async () => {
     setLoading(true)
     try {
-      const r = await api.post('/tickets', { vehicle, zoneId })
-      setTicketId(r.data.id)
+      const r = await api.post('/ai/sessions/start', { zone_id: zoneId, vehicle_plate: vehicle })
+      setSessionId(r.data.id)
       setStatus('Открыт')
       setStage('open')
     } finally {
@@ -62,12 +63,14 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
   }
 
   const close = async () => {
-    if (!ticketId) return
+    if (!sessionId) return
     setLoading(true)
     try {
-      const r = await api.post(`/tickets/${ticketId}/close`)
-      setStatus(`Закрыт, сумма: ${r.data.amount}`)
-      setAmount(Number(r.data.amount))
+      const r = await api.post(`/ai/sessions/${sessionId}/close`)
+      const due = Number(r.data.amount_due_cents || 0)
+      setStatus(`Закрыт, сумма: ${(due/100).toFixed(2)} MDL`)
+      setAmount(due/100)
+      setAmountCents(due)
       setStage('closed')
     } finally {
       setLoading(false)
@@ -75,28 +78,29 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
   }
 
   const doPay = async () => {
-    if (!ticketId) return
+    if (!sessionId) return
     setLoading(true)
     try {
-      const r = await api.post(`/payments/${ticketId}/pay`)
-      setStatus(`Оплачен (${r.data.payment.provider_payment_id || r.data.payment.paymentId})`)
+      const r = await api.post(`/ai/sessions/${sessionId}/payments`, { method: 'card', amount_cents: amountCents || 0, approved: true })
+      setStatus(`Оплачен (${r.data.payment.processor_ref || r.data.payment.id})`)
       setStage('paid')
       // Освобождаем возможность открыть новую парковку
-      setTicketId(null)
+      setSessionId(null)
       setAmount(null)
+      setAmountCents(null)
     } finally {
       setLoading(false)
     }
   }
 
   const pay = async () => {
-    if (!ticketId) return
+    if (!sessionId) return
     // Показываем подтверждение оплаты с суммой
     setConfirmOpen(true)
   }
 
   const reset = () => {
-    setTicketId(null)
+    setSessionId(null)
     setStatus('')
     setStage('idle')
     // по желанию можно очищать номер:
@@ -162,16 +166,16 @@ export default function TicketFlow({ zoneId, vehicle, onVehicleChange }: { zoneI
         {loading ? <span className="text-gray-500">Обработка…</span> : <span>Статус: {status || '—'}</span>}
       </div>
       {/* Автопоиск открытого билета по номеру */}
-      <VehicleWatcher vehicle={vehicle} onFound={(t) => {
-        setTicketId(t.id)
+      <VehicleWatcher vehicle={vehicle} onFound={(s) => {
+        setSessionId(s.id)
         setStage('open')
-        setStatus(`Открыт (ID: ${t.id}, зона: ${t.zone_id})`)
+        setStatus(`Открыт (ID: ${s.id}, зона: ${s.zone_id})`)
       }} />
     </div>
   )
 }
 
-function VehicleWatcher({ vehicle, onFound }: { vehicle: string; onFound: (t: any) => void }) {
+function VehicleWatcher({ vehicle, onFound }: { vehicle: string; onFound: (s: any) => void }) {
   const [lastQueried, setLastQueried] = useState<string>('')
   useEffect(() => {
     if (!vehicle || vehicle.trim().length < 4) return
@@ -179,7 +183,7 @@ function VehicleWatcher({ vehicle, onFound }: { vehicle: string; onFound: (t: an
     const id = setTimeout(async () => {
       if (v === lastQueried) return
       try {
-        const r = await api.get('/tickets/search', { params: { vehicle: v } })
+        const r = await api.get('/ai/sessions/search', { params: { vehicle: v } })
         if (r.data && r.data.id) {
           onFound(r.data)
           setLastQueried(v)

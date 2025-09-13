@@ -115,16 +115,6 @@ function parseVehicleLoose(text: string): string | null {
 function parseZoneId(text: string): number | null {
   const m = text.match(/\b(?:зона|zona|zone)\s*(\d{1,2})\b/i);
   if (m) return parseInt(m[1], 10);
-  // Support single-letter zone names like A/B/C including Cyrillic equivalents
-  const m2 = text.match(/\b(?:зона|zona|zone)?\s*([A-Za-zА-ЯЁ]{1})\b/i);
-  if (m2) {
-    const ch = m2[1].toUpperCase();
-    const map: Record<string, string> = { 'А': 'A', 'Б': 'B', 'В': 'B', 'С': 'C' };
-    const latin = /[A-Z]/.test(ch) ? ch : (map[ch] || ch);
-    if (['A','B','C'].includes(latin)) {
-      return ({ A: 1, B: 2, C: 3 } as any)[latin];
-    }
-  }
   return null;
 }
 

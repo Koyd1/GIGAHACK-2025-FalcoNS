@@ -12,7 +12,7 @@ export default function App() {
   const [vehicle, setVehicle] = useState<string>('')
 
   useEffect(() => {
-    api.get('/zones').then(r => setZones(r.data)).catch(() => setZones([]))
+    api.get('/ai/zones').then(r => setZones(r.data)).catch(() => setZones([]))
   }, [])
 
   return (

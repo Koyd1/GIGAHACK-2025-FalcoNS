@@ -3,12 +3,15 @@ type Zone = { id: number; name: string }
 export default function Zones({ zones }: { zones: Zone[] }) {
   return (
     <div>
-      <h3 className="text-lg font-semibold mb-2">Зоны</h3>
-      <ul className="divide-y divide-gray-200 dark:divide-gray-700">
+      <h3 className="text-lg font-semibold mb-3">Зоны</h3>
+      <div className="flex flex-wrap gap-2">
         {zones.map(z => (
-          <li key={z.id} className="py-2">{z.name}</li>
+          <span key={z.id} className="inline-flex items-center px-3 py-1 rounded-full text-sm bg-gray-100 dark:bg-gray-700">
+            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 mr-2" />{z.name}
+          </span>
         ))}
-      </ul>
+        {zones.length === 0 && <span className="text-sm text-gray-500">Нет зон</span>}
+      </div>
     </div>
   )
 }

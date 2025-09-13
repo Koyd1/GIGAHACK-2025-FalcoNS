@@ -49,19 +49,20 @@ export default router;
  
 // Reports
 router.get('/admin/reports', async (_req, res) => {
-  // Revenue by zone for paid tickets
+  // AI-only: revenue by zone from approved payments
   const revenue = await query(
-    `SELECT z.name as zone, COALESCE(SUM(t.amount), 0) as revenue
-     FROM zones z
-     LEFT JOIN tickets t ON t.zone_id = z.id AND t.status = 'paid'
+    `SELECT z.name as zone, COALESCE(SUM(p.amount_cents), 0) / 100.0 as revenue
+     FROM ai.zone z
+     LEFT JOIN ai.session s ON s.zone_id = z.id
+     LEFT JOIN ai.payment p ON p.session_id = s.id AND p.approved = true
      GROUP BY z.name
      ORDER BY z.name`
   );
-  // Open tickets count by zone
+  // AI-only: open sessions count by zone
   const open = await query(
-    `SELECT z.name as zone, COUNT(t.id) as open
-     FROM zones z
-     LEFT JOIN tickets t ON t.zone_id = z.id AND t.status = 'open'
+    `SELECT z.name as zone, COUNT(s.id) as open
+     FROM ai.zone z
+     LEFT JOIN ai.session s ON s.zone_id = z.id AND s.status = 'active'
      GROUP BY z.name
      ORDER BY z.name`
   );
@@ -70,43 +71,32 @@ router.get('/admin/reports', async (_req, res) => {
 
 // Open sessions list
 router.get('/admin/sessions/open', async (_req, res) => {
-  // 1) Public tickets (manual flow)
-  const rPub = await query(
-    `SELECT t.id, t.vehicle, t.zone_id, z.name as zone_name, t.started_at,
-            EXTRACT(EPOCH FROM (NOW() - t.started_at))::int as elapsed_sec,
-            r.price_per_hour, r.currency
-     FROM tickets t
-     JOIN zones z ON z.id = t.zone_id
-     JOIN rates r ON r.zone_id = t.zone_id AND r.currency = (SELECT currency FROM rates WHERE zone_id=t.zone_id LIMIT 1)
-     WHERE t.status = 'open'
-     ORDER BY t.started_at ASC`
-  );
   const out: any[] = [];
-  for (const row of rPub.rows) {
-    const started = new Date(row.started_at as any).getTime();
-    const ended = Date.now();
-    const hours = Math.max(1, Math.ceil((ended - started) / 3600000));
-    const base = Number(row.price_per_hour) * hours;
-    const useAi = (process.env.USE_AI_PRICING || 'true') !== 'false';
-    const m = useAi ? await recommendMultiplier(row.zone_id) : 1.0;
-    const due = Math.round(base * m * 100) / 100;
-    out.push({ ...row, due_amount: due });
+  // Try modern tariff schema first; on error, fallback to legacy columns
+  let aiTariff: any = { id: null, name: 'Default', free_minutes: 0, rate_cents_per_hour: 1000, max_daily_cents: null };
+  try {
+    const rTariff = await query(`
+      WITH desired AS (
+        SELECT CASE WHEN EXTRACT(DOW FROM NOW())::int BETWEEN 1 AND 5 THEN 'weekday' ELSE 'weekend' END AS d
+      )
+      SELECT id, name, free_minutes, rate_cents_per_hour, max_daily_cents, applies_on
+      FROM ai.tariff, desired
+      WHERE active = TRUE
+      ORDER BY
+        (applies_on <> (SELECT d FROM desired)) ASC,
+        (applies_on <> 'always') ASC,
+        id ASC
+      LIMIT 1
+    `);
+    aiTariff = rTariff.rows[0] || aiTariff;
+  } catch {
+    // Legacy fallback: pick the first row and synthesize fields
+    const rOld = await query(`SELECT id, free_minutes, rate_cents_per_hour, max_daily_cents FROM ai.tariff ORDER BY id LIMIT 1`).catch(() => ({ rows: [] } as any));
+    if (rOld.rows?.[0]) {
+      const t = rOld.rows[0];
+      aiTariff = { id: t.id, name: 'Default', free_minutes: Number(t.free_minutes || 0), rate_cents_per_hour: Number(t.rate_cents_per_hour || 1000), max_daily_cents: t.max_daily_cents != null ? Number(t.max_daily_cents) : null };
+    }
   }
-
-  // 2) AI sessions (voice flow)
-  const rTariff = await query(`
-    WITH desired AS (
-      SELECT CASE WHEN EXTRACT(DOW FROM NOW())::int BETWEEN 1 AND 5 THEN 'weekday' ELSE 'weekend' END AS d
-    )
-    SELECT id, name, free_minutes, rate_cents_per_hour, max_daily_cents, applies_on
-    FROM ai.tariff, desired
-    ORDER BY
-      (applies_on <> (SELECT d FROM desired)) ASC,
-      (applies_on <> 'always') ASC,
-      id ASC
-    LIMIT 1
-  `);
-  const aiTariff = rTariff.rows[0] || { id: null, name: 'Default', free_minutes: 0, rate_cents_per_hour: 1000, max_daily_cents: null };
   const rAi = await query(
     `SELECT s.id,
             COALESCE(v.plate, '—') as vehicle,
@@ -156,19 +146,29 @@ router.post('/admin/sessions/:id/close', async (req, res) => {
   const sr = await query('SELECT * FROM ai.session WHERE id=$1 AND status=\'active\'', [id]);
   if (sr.rowCount === 0) return res.status(404).json({ error: 'session not found' });
   const s = sr.rows[0];
-  const tfr = await query(`
-    WITH desired AS (
-      SELECT CASE WHEN EXTRACT(DOW FROM NOW())::int BETWEEN 1 AND 5 THEN 'weekday' ELSE 'weekend' END AS d
-    )
-    SELECT id, name, free_minutes, rate_cents_per_hour, max_daily_cents, applies_on
-    FROM ai.tariff, desired
-    ORDER BY
-      (applies_on <> (SELECT d FROM desired)) ASC,
-      (applies_on <> 'always') ASC,
-      id ASC
-    LIMIT 1
-  `);
-  const tariff = tfr.rows[0] || { id: null, name: 'Default', free_minutes: 0, rate_cents_per_hour: 1000, max_daily_cents: null };
+  let tariff: any = { id: null, name: 'Default', free_minutes: 0, rate_cents_per_hour: 1000, max_daily_cents: null };
+  try {
+    const tfr = await query(`
+      WITH desired AS (
+        SELECT CASE WHEN EXTRACT(DOW FROM NOW())::int BETWEEN 1 AND 5 THEN 'weekday' ELSE 'weekend' END AS d
+      )
+      SELECT id, name, free_minutes, rate_cents_per_hour, max_daily_cents, applies_on
+      FROM ai.tariff, desired
+      WHERE active = TRUE
+      ORDER BY
+        (applies_on <> (SELECT d FROM desired)) ASC,
+        (applies_on <> 'always') ASC,
+        id ASC
+      LIMIT 1
+    `);
+    tariff = tfr.rows[0] || tariff;
+  } catch {
+    const rOld = await query(`SELECT id, free_minutes, rate_cents_per_hour, max_daily_cents FROM ai.tariff ORDER BY id LIMIT 1`).catch(() => ({ rows: [] } as any));
+    if (rOld.rows?.[0]) {
+      const t = rOld.rows[0];
+      tariff = { id: t.id, name: 'Default', free_minutes: Number(t.free_minutes || 0), rate_cents_per_hour: Number(t.rate_cents_per_hour || 1000), max_daily_cents: t.max_daily_cents != null ? Number(t.max_daily_cents) : null };
+    }
+  }
   const startMs = s.entry_time ? new Date(s.entry_time as any).getTime() : Date.now();
   const endMs = Date.now();
   const totalMinutes = Math.max(0, Math.round((endMs - startMs) / 60000));

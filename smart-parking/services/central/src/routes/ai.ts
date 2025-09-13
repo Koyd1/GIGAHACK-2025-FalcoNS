@@ -5,6 +5,18 @@ const router = Router();
 
 // Utilities
 const now = () => new Date().toISOString();
+const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+const genTicketCode = () => {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const MM = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mm = pad(d.getMinutes());
+  const ss = pad(d.getSeconds());
+  const rnd = Math.floor(100 + Math.random() * 900); // 3 digits to avoid collisions
+  return `TCK-${yyyy}${MM}${dd}-${hh}${mm}${ss}-${rnd}`;
+};
 
 // List discount rules
 router.get('/ai/discount-rules', async (_req, res) => {
@@ -105,11 +117,23 @@ router.post('/ai/sessions/start', async (req, res) => {
     const vr = await query(`INSERT INTO ai.vehicle (plate) VALUES (UPPER($1)) ON CONFLICT (plate) DO UPDATE SET plate=EXCLUDED.plate RETURNING id`, [String(vehicle_plate)]);
     vid = vr.rows[0].id;
   }
-  // Ticket (optional)
+  // Ticket: auto-generate code by date/time if not provided
   let tid: number | null = null;
-  if (ticket_code) {
-    const tr = await query(`INSERT INTO ai.ticket (code, issued_at, entry_station, status) VALUES ($1, NOW(), $2, 'active') ON CONFLICT (code) DO UPDATE SET code=EXCLUDED.code RETURNING id`, [String(ticket_code), entry_station_id || null]);
-    tid = tr.rows[0].id;
+  let tcode: string | null = null;
+  {
+    let code = ticket_code && String(ticket_code).trim() ? String(ticket_code).trim().toUpperCase() : genTicketCode();
+    // Try a couple of times to avoid rare collisions
+    for (let i = 0; i < 3; i++) {
+      const tr = await query(
+        `INSERT INTO ai.ticket (code, issued_at, entry_station, status)
+         VALUES ($1, NOW(), $2, 'active')
+         ON CONFLICT (code) DO NOTHING
+         RETURNING id`,
+        [code, entry_station_id || null]
+      );
+      if (tr.rowCount > 0) { tid = tr.rows[0].id; tcode = code; break; }
+      code = genTicketCode();
+    }
   }
   // Pick parking via zone
   const pr = await query(`SELECT parking_id FROM ai.zone WHERE id=$1`, [zid]);
@@ -117,20 +141,30 @@ router.post('/ai/sessions/start', async (req, res) => {
   const pid = pr.rows[0].parking_id as number;
 
   const r = await query(
-    `INSERT INTO ai.session (parking_id, zone_id, vehicle_id, ticket_id, entry_time, entry_station, status)
-     VALUES ($1, $2, $3, $4, NOW(), $5, 'active')
+    `INSERT INTO ai.session (parking_id, zone_id, vehicle_id, ticket_id, entry_time, entry_station, status, licence_plate_entry)
+     VALUES ($1, $2, $3, $4, NOW(), $5, 'active', $6)
      RETURNING *`,
-    [pid, zid, vid, tid, entry_station_id || null]
+    [pid, zid, vid, tid, entry_station_id || null, vehicle_plate ? String(vehicle_plate).toUpperCase() : null]
   );
   // Audit
-  await query(`INSERT INTO ai.event (session_id, station_id, type, occurred_at, payload_json) VALUES ($1, $2, $3, NOW(), $4)`, [r.rows[0].id, entry_station_id || null, 'ticket_issued', JSON.stringify({ ticket_code: ticket_code || null, vehicle_plate: vehicle_plate || null })]);
+  await query(
+    `INSERT INTO ai.event (session_id, station_id, type, occurred_at, payload_json)
+     VALUES ($1, $2, $3, NOW(), $4)`,
+    [
+      r.rows[0].id,
+      entry_station_id || null,
+      'ticket_issued',
+      JSON.stringify({ ticket_code: tcode, vehicle_plate: vehicle_plate || null })
+    ]
+  );
   res.status(201).json(r.rows[0]);
 });
 
 // Compute due and close session using simple tariff (first tariff row)
 router.post('/ai/sessions/:id/close', async (req, res) => {
   const id = Number(req.params.id);
-  const tr = await query(`
+  const { exit_station_id, licence_plate_exit } = (req.body || {}) as { exit_station_id?: number; licence_plate_exit?: string };
+  let tr = await query(`
     WITH desired AS (
       SELECT CASE WHEN EXTRACT(DOW FROM NOW())::int BETWEEN 1 AND 5 THEN 'weekday' ELSE 'weekend' END AS d
     )
@@ -140,6 +174,7 @@ router.post('/ai/sessions/:id/close', async (req, res) => {
     CROSS JOIN LATERAL (
       SELECT id, name, free_minutes, rate_cents_per_hour, max_daily_cents, applies_on
       FROM ai.tariff, desired
+      WHERE active = TRUE
       ORDER BY
         (applies_on <> (SELECT d FROM desired)) ASC,
         (applies_on <> 'always') ASC,
@@ -147,7 +182,21 @@ router.post('/ai/sessions/:id/close', async (req, res) => {
       LIMIT 1
     ) t
     WHERE s.id=$1
-  `, [id]);
+  `, [id]).catch(() => null as any);
+  if (!tr) {
+    tr = await query(`
+      SELECT s.*, t.id AS tariff_id, 'Default' AS tariff_name,
+             t.free_minutes, t.rate_cents_per_hour, t.max_daily_cents
+      FROM ai.session s
+      CROSS JOIN LATERAL (
+        SELECT id, free_minutes, rate_cents_per_hour, max_daily_cents
+        FROM ai.tariff
+        ORDER BY id
+        LIMIT 1
+      ) t
+      WHERE s.id=$1
+    `, [id]);
+  }
   if (tr.rowCount === 0) return res.status(404).json({ error: 'session not found' });
   const s = tr.rows[0];
   const startMs = new Date(s.entry_time).getTime();
@@ -165,7 +214,16 @@ router.post('/ai/sessions/:id/close', async (req, res) => {
     rate_cents_per_hour: s.rate_cents_per_hour,
     max_daily_cents: s.max_daily_cents
   })]);
-  const r = await query(`UPDATE ai.session SET exit_time=NOW(), status='closed', amount_due_cents=$1 WHERE id=$2 RETURNING *`, [due, id]);
+  const r = await query(`
+    UPDATE ai.session
+       SET exit_time = NOW(),
+           status = 'closed',
+           amount_due_cents = $1,
+           exit_station = COALESCE($2, exit_station),
+           licence_plate_exit = COALESCE(UPPER($3), licence_plate_exit)
+     WHERE id = $4
+     RETURNING *
+  `, [due, exit_station_id || null, (licence_plate_exit || null), id]);
   await query(`INSERT INTO ai.event (session_id, type, occurred_at, payload_json) VALUES ($1, $2, NOW(), $3)`, [id, 'info', JSON.stringify({ reason: 'closed', amount_due_cents: due })]);
   res.json(r.rows[0]);
 });
@@ -183,7 +241,13 @@ router.post('/ai/sessions/:id/payments', async (req, res) => {
     [id, station_id || null, m, Number(amount_cents), Boolean(approved), processor_ref || null]
   );
   // Update totals
-  await query(`UPDATE ai.session SET amount_paid_cents = COALESCE(amount_paid_cents,0) + $1, status = CASE WHEN COALESCE(amount_paid_cents,0) + $1 >= COALESCE(amount_due_cents,0) AND COALESCE(amount_due_cents,0) > 0 THEN 'paid' ELSE status END WHERE id=$2`, [Number(amount_cents), id]);
+  await query(`
+    UPDATE ai.session
+       SET amount_paid_cents = COALESCE(amount_paid_cents,0) + $1,
+           status = CASE WHEN COALESCE(amount_paid_cents,0) + $1 >= COALESCE(amount_due_cents,0) AND COALESCE(amount_due_cents,0) > 0 THEN 'paid' ELSE status END,
+           paid_until = CASE WHEN COALESCE(amount_paid_cents,0) + $1 >= COALESCE(amount_due_cents,0) AND COALESCE(amount_due_cents,0) > 0 THEN NOW() ELSE paid_until END
+     WHERE id = $2
+  `, [Number(amount_cents), id]);
   // Event
   await query(`INSERT INTO ai.event (session_id, station_id, type, occurred_at, payload_json) VALUES ($1, $2, $3, NOW(), $4)`, [id, station_id || null, approved ? 'payment_success' : 'payment_attempt', JSON.stringify({ amount_cents, method: m, approved: !!approved, processor_ref: processor_ref || null })]);
   res.status(201).json({ payment: pr.rows[0] });
@@ -191,29 +255,70 @@ router.post('/ai/sessions/:id/payments', async (req, res) => {
 
 export default router;
 
-// Tariff management (for AI assistant / admin UI)
-router.get('/ai/tariffs', async (_req, res) => {
-  const r = await query(`SELECT id, name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents FROM ai.tariff ORDER BY id`);
+// List AI zones for user/UI
+router.get('/ai/zones', async (_req, res) => {
+  const r = await query('SELECT id, name FROM ai.zone ORDER BY id');
   res.json(r.rows);
 });
 
+// Tariff management (for AI assistant / admin UI)
+router.get('/ai/tariffs', async (_req, res) => {
+  try {
+    const r = await query(`SELECT id, name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents, active FROM ai.tariff ORDER BY id`);
+    res.json(r.rows);
+  } catch (e) {
+    // Fallback for older schema (without name/applies_on/active)
+    const r = await query(`SELECT id, free_minutes, rate_cents_per_hour, max_daily_cents FROM ai.tariff ORDER BY id`).catch(() => ({ rows: [] } as any));
+    const rows = (r.rows || []).map((x: any) => ({
+      id: x.id,
+      name: `Tariff #${x.id}`,
+      applies_on: 'always',
+      free_minutes: Number(x.free_minutes || 0),
+      rate_cents_per_hour: Number(x.rate_cents_per_hour || 0),
+      max_daily_cents: x.max_daily_cents != null ? Number(x.max_daily_cents) : null,
+      active: true
+    }));
+    res.json(rows);
+  }
+});
+
 router.post('/ai/tariffs', async (req, res) => {
-  const { name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents } = req.body || {};
+  const { name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents, active } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name required' });
   const a = (applies_on || 'custom').toString().toLowerCase();
   if (!['always','weekday','weekend','custom'].includes(a)) return res.status(400).json({ error: 'invalid applies_on' });
-  const r = await query(
-    `INSERT INTO ai.tariff (name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents)
-     VALUES ($1, $2, COALESCE($3,0), COALESCE($4,0), $5)
-     RETURNING id, name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents`,
-    [String(name), a, free_minutes != null ? Number(free_minutes) : 0, rate_cents_per_hour != null ? Number(rate_cents_per_hour) : 0, max_daily_cents != null ? Number(max_daily_cents) : null]
-  );
-  res.status(201).json(r.rows[0]);
+  try {
+    const r = await query(
+      `INSERT INTO ai.tariff (name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents, active)
+       VALUES ($1, $2, COALESCE($3,0), COALESCE($4,0), $5, COALESCE($6, TRUE))
+       RETURNING id, name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents, active`,
+      [String(name), a, free_minutes != null ? Number(free_minutes) : 0, rate_cents_per_hour != null ? Number(rate_cents_per_hour) : 0, max_daily_cents != null ? Number(max_daily_cents) : null, active != null ? Boolean(active) : true]
+    );
+    return res.status(201).json(r.rows[0]);
+  } catch (e) {
+    // Fallback for older schema
+    const r = await query(
+      `INSERT INTO ai.tariff (free_minutes, rate_cents_per_hour, max_daily_cents)
+       VALUES ($1, $2, $3)
+       RETURNING id, free_minutes, rate_cents_per_hour, max_daily_cents`,
+      [free_minutes != null ? Number(free_minutes) : 0, rate_cents_per_hour != null ? Number(rate_cents_per_hour) : 0, max_daily_cents != null ? Number(max_daily_cents) : null]
+    );
+    const row = r.rows[0];
+    return res.status(201).json({
+      id: row.id,
+      name: String(name),
+      applies_on: a,
+      free_minutes: Number(row.free_minutes || 0),
+      rate_cents_per_hour: Number(row.rate_cents_per_hour || 0),
+      max_daily_cents: row.max_daily_cents != null ? Number(row.max_daily_cents) : null,
+      active: active != null ? !!active : true
+    });
+  }
 });
 
 router.put('/ai/tariffs/:id', async (req, res) => {
   const id = Number(req.params.id);
-  const { name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents } = req.body || {};
+  const { name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents, active } = req.body || {};
   const sets: string[] = [];
   const vals: any[] = [];
   if (name != null) { sets.push(`name=$${sets.length+1}`); vals.push(String(name)); }
@@ -225,9 +330,30 @@ router.put('/ai/tariffs/:id', async (req, res) => {
   if (free_minutes != null) { sets.push(`free_minutes=$${sets.length+1}`); vals.push(Number(free_minutes)); }
   if (rate_cents_per_hour != null) { sets.push(`rate_cents_per_hour=$${sets.length+1}`); vals.push(Number(rate_cents_per_hour)); }
   if (max_daily_cents !== undefined) { sets.push(`max_daily_cents=$${sets.length+1}`); vals.push(max_daily_cents != null ? Number(max_daily_cents) : null); }
+  if (active != null) { sets.push(`active=$${sets.length+1}`); vals.push(Boolean(active)); }
   if (sets.length === 0) return res.status(400).json({ error: 'nothing to update' });
   vals.push(id);
-  const r = await query(`UPDATE ai.tariff SET ${sets.join(', ')} WHERE id=$${sets.length+1} RETURNING id, name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents`, vals);
-  if (r.rowCount === 0) return res.status(404).json({ error: 'not_found' });
-  res.json(r.rows[0]);
+  try {
+    const r = await query(`UPDATE ai.tariff SET ${sets.join(', ')} WHERE id=$${sets.length+1} RETURNING id, name, applies_on, free_minutes, rate_cents_per_hour, max_daily_cents, active`, vals);
+    if (r.rowCount === 0) return res.status(404).json({ error: 'not_found' });
+    return res.json(r.rows[0]);
+  } catch (e) {
+    // Fallback for older schema: only update numeric fields
+    const sets2: string[] = [];
+    const vals2: any[] = [];
+    if (free_minutes != null) { sets2.push(`free_minutes=$${sets2.length+1}`); vals2.push(Number(free_minutes)); }
+    if (rate_cents_per_hour != null) { sets2.push(`rate_cents_per_hour=$${sets2.length+1}`); vals2.push(Number(rate_cents_per_hour)); }
+    if (max_daily_cents !== undefined) { sets2.push(`max_daily_cents=$${sets2.length+1}`); vals2.push(max_daily_cents != null ? Number(max_daily_cents) : null); }
+    if (sets2.length === 0) return res.status(400).json({ error: 'nothing to update (legacy schema)' });
+    vals2.push(id);
+    const r2 = await query(`UPDATE ai.tariff SET ${sets2.join(', ')} WHERE id=$${sets2.length+1} RETURNING id, free_minutes, rate_cents_per_hour, max_daily_cents`, vals2);
+    const row = r2.rows[0];
+    return res.json({ id: row.id, name: name ?? `Tariff #${row.id}`, applies_on: applies_on ?? 'always', free_minutes: row.free_minutes, rate_cents_per_hour: row.rate_cents_per_hour, max_daily_cents: row.max_daily_cents, active: active ?? true });
+  }
+});
+
+router.delete('/ai/tariffs/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const r = await query('DELETE FROM ai.tariff WHERE id=$1', [id]);
+  res.json({ ok: true, deleted: r.rowCount });
 });

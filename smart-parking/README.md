@@ -75,6 +75,20 @@ Key URLs
 - Payment sandbox config: `http://localhost:5002/__sandbox/config`
 - AI module: `http://localhost:8000/`
 
+Import SQLite data (optional)
+- Goal: load your `parking_sqlite.sql` (SQLite dump) into Postgres `ai.*` tables used by the app.
+- Steps:
+  1) Migrate DB: `make migrate` (ensures `ai.*` exists).
+  2) Stage SQLite dump into a separate schema:
+     - Host shell (psql sees the file):
+       - `cat smart-parking/db/tools/sqlite_stage_preamble.sql parking_sqlite.sql | psql "$DATABASE_URL" -v ON_ERROR_STOP=1`
+     - Or via Docker:
+       - `docker compose exec -T db bash -lc "psql -U $POSTGRES_USER -d $POSTGRES_DB -v ON_ERROR_STOP=1 -f /app/db/tools/sqlite_stage_preamble.sql" < parking_sqlite.sql`
+  3) Transform into `ai.*`: `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f smart-parking/db/tools/import_sqlite_to_ai.sql`
+  4) Verify:
+     - `curl http://localhost:8080/api/admin/sessions/open`
+     - `curl http://localhost:8080/api/ai/tariffs`
+
 API docs and metrics
 - Swagger UI: `http://localhost:8080/api/docs` (OpenAPI JSON: `/api/openapi.json`).
 - Prometheus metrics: `http://localhost:8080/metrics` (gateway) и `http://localhost:4000/metrics` (central).

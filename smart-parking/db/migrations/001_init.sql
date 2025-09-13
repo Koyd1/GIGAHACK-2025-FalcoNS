@@ -109,9 +109,13 @@ CREATE TABLE IF NOT EXISTS ai.session (
   entry_time TIMESTAMP NULL,
   exit_time TIMESTAMP NULL,
   entry_station INTEGER NULL,
+  exit_station INTEGER NULL REFERENCES ai.station(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'active',
   amount_due_cents INTEGER NULL,
-  amount_paid_cents INTEGER NULL
+  amount_paid_cents INTEGER NULL,
+  paid_until TIMESTAMP NULL,
+  licence_plate_entry TEXT NULL,
+  licence_plate_exit TEXT NULL
 );
 
 CREATE TABLE IF NOT EXISTS ai.event (
@@ -156,4 +160,3 @@ CREATE TABLE IF NOT EXISTS ai.payment (
   processor_ref TEXT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
-
