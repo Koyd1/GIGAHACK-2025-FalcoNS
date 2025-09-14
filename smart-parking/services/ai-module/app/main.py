@@ -108,7 +108,7 @@ def exit_decision(body: ExitInput):
                         print("[ai-exit] close2 call failed")
             except Exception:
                 pass
-            return {"decision": "open_qr_48h", "message": "Откроем шлагбаум. В течение 48 часов оплатите парковку, отсканировав QR‑код на талоне.", "sessionId": sid}
+            return {"decision": "open_qr_48h", "message": "Откроем шлагбаум. В течение 48 часов оплатите парковку, отсканировав QR‑код на талоне. Иначе окажетесь в чёрном списке. Иначе окажетесь в чёрном списке.", "sessionId": sid}
         if body.has_ticket is False:
             if body.phone and body.phone.isdigit() and len(body.phone) == 9:
                 try:
@@ -131,7 +131,7 @@ def exit_decision(body: ExitInput):
                             print("[ai-exit] close2 call failed")
                 except Exception:
                     pass
-                return {"decision": "open_sms_48h", "message": f"Откроем шлагбаум. Ссылка на оплату отправлена на {body.phone}. Оплатите в течение 48 часов.", "sessionId": sid}
+                return {"decision": "open_sms_48h", "message": f"Откроем шлагбаум. Ссылка на оплату отправлена на {body.phone}. Оплатите в течение 48 часов. Иначе окажетесь в чёрном списке.", "sessionId": sid}
             return {"decision": "need_phone", "message": "Введите номер телефона (9 цифр) для поздней оплаты.", "sessionId": sid}
         # ask about ticket
         return {"decision": "need_ticket", "message": "Оплата не произведена. У вас есть талон? (да/нет)", "sessionId": sid}
@@ -146,7 +146,7 @@ def exit_decision(body: ExitInput):
         if not vehicle:
             return {"decision": "need_vehicle", "message": "Пожалуйста, введите номер машины", "sessionId": None}
         if body.phone and body.phone.isdigit() and len(body.phone) == 9:
-            return {"decision": "open_sms_48h", "message": f"Откроем шлагбаум. Ссылка на оплату отправлена на {body.phone}. Оплатите в течение 48 часов.", "sessionId": None}
+            return {"decision": "open_sms_48h", "message": f"Откроем шлагбаум. Ссылка на оплату отправлена на {body.phone}. Оплатите в течение 48 часов. Иначе окажетесь в чёрном списке. Иначе окажетесь в чёрном списке.", "sessionId": None}
         return {"decision": "need_phone", "message": "Введите номер телефона (9 цифр) для поздней оплаты", "sessionId": None}
 
     # No info yet — follow scheme: ANPR not recognized → спросить про талон
